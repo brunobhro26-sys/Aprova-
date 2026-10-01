@@ -1,0 +1,6 @@
+{
+  "name": "APROVA+ | Plataforma de Estudos para Concursos",
+  "description": "Estude de forma inteligente. Milhares de questões comentadas, simulados personalizáveis, plano de estudos dinâmico, caderno de erros e métricas de desempenho.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

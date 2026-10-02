@@ -688,7 +688,8 @@ app.post('/api/questions', requireAuth, async (req: AuthRequest, res) => {
 app.post('/api/questions/:id/attempt', requireAuth, async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
-    const { selectedOptionLetter, timeSpentSeconds } = req.body;
+    const { selectedOptionLetter, selectedLetter, timeSpentSeconds } = req.body;
+    const chosenLetter = selectedOptionLetter || selectedLetter;
     const userId = req.user?.uid || 'user-bruno-student';
 
     // Verify correct alternative
@@ -697,7 +698,7 @@ app.post('/api/questions/:id/attempt', requireAuth, async (req: AuthRequest, res
       .from(questionAlternatives)
       .where(and(eq(questionAlternatives.questionId, id), eq(questionAlternatives.isCorrect, true)));
 
-    const isCorrect = correctAlt ? correctAlt.letter === selectedOptionLetter : false;
+    const isCorrect = correctAlt ? correctAlt.letter === chosenLetter : false;
 
     // Get previous attempts count
     const prevAttempts = await db
@@ -710,7 +711,7 @@ app.post('/api/questions/:id/attempt', requireAuth, async (req: AuthRequest, res
     const [attempt] = await db.insert(questionAttempts).values({
       userId,
       questionId: id,
-      selectedOptionLetter,
+      selectedOptionLetter: chosenLetter,
       isCorrect,
       timeSpentSeconds: Number(timeSpentSeconds || 0),
       attemptNumber

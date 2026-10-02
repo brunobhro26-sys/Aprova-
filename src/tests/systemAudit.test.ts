@@ -3,6 +3,7 @@ import { db } from '../db/index.ts';
 import {
   users,
   questions,
+  questionAlternatives,
   questionAttempts,
   simulations,
   simulationSessions,
@@ -12,7 +13,7 @@ import {
   subscriptions,
   auditLogs
 } from '../db/schema.ts';
-import { eq, sql } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import { GamificationService } from '../services/gamificationService.ts';
 
 async function runComprehensiveAudit() {
@@ -81,7 +82,11 @@ async function runComprehensiveAudit() {
     console.log('\n--- 3. Banco de Questões & Resolução ---');
     const [sampleQ] = await db.select().from(questions).limit(1);
     assert(!!sampleQ, 'Banco de questões possui questões cadastradas');
-    assert(!!sampleQ.correctLetter, 'Questão possui gabarito oficial definido');
+    const [correctAlt] = await db
+      .select()
+      .from(questionAlternatives)
+      .where(and(eq(questionAlternatives.questionId, sampleQ.id), eq(questionAlternatives.isCorrect, true)));
+    assert(!!correctAlt?.letter, 'Questão possui gabarito oficial definido');
 
     // Testar tentativa de resposta via API
     const attemptRes = await fetch(`http://localhost:3000/api/questions/${sampleQ.id}/attempt`, {
@@ -89,7 +94,7 @@ async function runComprehensiveAudit() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId: 'user-bruno-student',
-        selectedLetter: sampleQ.correctLetter,
+        selectedOptionLetter: correctAlt?.letter || 'A',
         timeSpentSeconds: 45
       })
     });

@@ -310,7 +310,7 @@ export const ProfileView: React.FC = () => {
                 Privacidade, LGPD & Seus Direitos
               </h3>
             </div>
-            <Badge variant="neutral" size="sm">Lei 13.709/2018</Badge>
+            <Badge variant="default" size="sm">Lei 13.709/2018</Badge>
           </div>
 
           <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">

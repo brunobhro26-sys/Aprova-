@@ -94,9 +94,14 @@ export function requireAdminRole(allowedRoles: string[] = ['SUPERADMIN', 'ADMIN'
       }
 
       // Attach resolved admin user
-      (req as any).adminUser = dbUser || {
+      (req as any).adminUser = dbUser ? {
+        id: dbUser.id,
+        name: dbUser.name,
+        email: dbUser.email,
+        role: effectiveRole
+      } : {
         id: uid || 'user-admin-demo',
-        name: dbUser?.name || 'Administrador APROVA+',
+        name: 'Administrador APROVA+',
         email: email || 'admin@aprova.com',
         role: effectiveRole
       };

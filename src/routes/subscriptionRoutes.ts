@@ -77,27 +77,26 @@ subscriptionRouter.post('/checkout', requireAuth, async (req: AuthRequest, res: 
     }
 
     const txId = `tx-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    const idempotencyKey = `idemp-checkout-${userId}-${planType}-${Date.now().toString().slice(0, -4)}`;
+    const priceFormatted = (priceCents / 100).toFixed(2);
 
-    // Criar registro pendente
+    // Criar registro pendente com schema real
     await db.insert(paymentTransactions).values({
       id: txId,
       userId,
-      amountCents: priceCents,
+      planName,
+      amount: priceFormatted,
       paymentMethod: paymentMethod || 'PIX',
-      status: 'PENDING',
-      gatewayTransactionId: `gw-${txId}`,
-      idempotencyKey,
-      metadataJson: JSON.stringify({ planType, planName, initiatedAt: new Date().toISOString() })
+      status: 'pending',
+      transactionCode: `gw-${txId}`,
     });
 
-    const pixCode = `00020126580014BR.GOV.BCB.PIX0136aprova-pagamentos-${txId}520400005303986540${(priceCents/100).toFixed(2)}5802BR5915APROVA PLUS EDU6009SAO PAULO62070503***6304ABCD`;
+    const pixCode = `00020126580014BR.GOV.BCB.PIX0136aprova-pagamentos-${txId}520400005303986540${priceFormatted}5802BR5915APROVA PLUS EDU6009SAO PAULO62070503***6304ABCD`;
 
     res.json({
       success: true,
       transactionId: txId,
       planName,
-      amountFormatted: `R$ ${(priceCents / 100).toFixed(2).replace('.', ',')}`,
+      amountFormatted: `R$ ${priceFormatted.replace('.', ',')}`,
       paymentMethod: paymentMethod || 'PIX',
       pixCopyPaste: pixCode,
       qrCodeData: pixCode,
@@ -138,17 +137,17 @@ subscriptionRouter.post('/webhook', async (req, res: Response) => {
     }
 
     // Proteção de Idempotência: se já processado com sucesso, responder 200 sem duplicar
-    if (existingTx.status === 'PAID') {
+    if (existingTx.status === 'paid' || existingTx.status === 'PAID') {
       return res.json({ success: true, message: 'Evento já processado anteriormente (idempotente)' });
     }
 
     const userId = existingTx.userId;
 
-    if (event === 'payment.approved' || status === 'PAID') {
-      // 1. Atualizar transação para PAID
+    if (event === 'payment.approved' || status === 'PAID' || status === 'paid') {
+      // 1. Atualizar transação para paid
       await db
         .update(paymentTransactions)
-        .set({ status: 'PAID', updatedAt: new Date() })
+        .set({ status: 'paid', paidAt: new Date() })
         .where(eq(paymentTransactions.id, transactionId));
 
       // 2. Conceder ou renovar assinatura
@@ -159,10 +158,10 @@ subscriptionRouter.post('/webhook', async (req, res: Response) => {
       await db.insert(subscriptions).values({
         id: subId,
         userId,
-        planId: 'plan-premium-mensal',
-        status: 'ACTIVE',
-        pricePaid: existingTx.amountCents,
-        billingCycle: 'MONTHLY',
+        planId: 'plan-monthly',
+        status: 'active',
+        pricePaid: existingTx.amount,
+        billingCycle: 'monthly',
         startDate: now,
         endDate: oneMonthLater,
         autoRenew: true
@@ -182,7 +181,7 @@ subscriptionRouter.post('/webhook', async (req, res: Response) => {
         recordId: subId,
         previousValue: 'GRATUITO',
         newValue: 'PREMIUM_MENSAL',
-        ipAddress: req.ip || '127.0.0.1'
+        ipAddress: (req.ip as string) || '127.0.0.1'
       });
 
       return res.json({
@@ -193,10 +192,10 @@ subscriptionRouter.post('/webhook', async (req, res: Response) => {
       });
     }
 
-    if (event === 'payment.failed' || status === 'FAILED') {
+    if (event === 'payment.failed' || status === 'FAILED' || status === 'failed') {
       await db
         .update(paymentTransactions)
-        .set({ status: 'FAILED', updatedAt: new Date() })
+        .set({ status: 'failed' })
         .where(eq(paymentTransactions.id, transactionId));
 
       return res.json({ success: true, message: 'Falha de pagamento registrada.' });

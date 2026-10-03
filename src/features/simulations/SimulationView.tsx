@@ -52,9 +52,15 @@ export const SimulationView: React.FC = () => {
   // Mode: 'list' | 'config' | 'taking' | 'result'
   const [viewState, setViewState] = useState<'list' | 'config' | 'taking' | 'result'>('list');
 
-  // Available Official Simulations and History from Backend
+  // Available Official Simulations, History, and Taxonomy from Backend
   const [availableSimulations, setAvailableSimulations] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
+  const [exams, setExams] = useState<any[]>([]);
+  const [organizations, setOrganizations] = useState<any[]>([]);
+  const [positions, setPositions] = useState<any[]>([]);
+  const [boards, setBoards] = useState<any[]>([]);
+  const [subjects, setSubjects] = useState<any[]>([]);
+  const [subjectsTopics, setSubjectsTopics] = useState<any[]>([]);
   const [loadingInitial, setLoadingInitial] = useState(true);
 
   // Active Session in progress
@@ -74,28 +80,55 @@ export const SimulationView: React.FC = () => {
   } | null>(null);
   const [resultFilter, setResultFilter] = useState<'all' | 'correct' | 'wrong' | 'blank'>('all');
 
-  // Custom simulation config form
-  const [configTitle, setConfigTitle] = useState('Simulado Personalizado Transpetro');
-  const [configTotalQuestions, setConfigTotalQuestions] = useState(20);
-  const [configTimeMinutes, setConfigTimeMinutes] = useState(30);
-  const [distPortuguese, setDistPortuguese] = useState(5);
-  const [distMath, setDistMath] = useState(5);
-  const [distElectrical, setDistElectrical] = useState(10);
-  const [isStartingCustom, setIsStartingCustom] = useState(false);
+  // Multi-mode Simulation Configurator (Prompt 11, Requisitos 12, 13 e 14)
+  const [simMode, setSimMode] = useState<'free' | 'contest' | 'discipline' | 'custom'>('free');
+  const [configTitle, setConfigTitle] = useState('Simulado Livre APROVA+');
+  const [selectedCount, setSelectedCount] = useState<number>(20);
+  const [selectedDuration, setSelectedDuration] = useState<number>(30); // minutes
+  const [filterContest, setFilterContest] = useState('Todos');
+  const [filterOrg, setFilterOrg] = useState('Todos');
+  const [filterPosition, setFilterPosition] = useState('Todos');
+  const [filterBoard, setFilterBoard] = useState('Todas');
+  const [filterDiscipline, setFilterDiscipline] = useState('Todas');
+  const [filterSubjectTopic, setFilterSubjectTopic] = useState('Todos');
+  const [filterDifficulty, setFilterDifficulty] = useState('Todas');
+  const [filterYear, setFilterYear] = useState('Todos');
+  const [previewData, setPreviewData] = useState<{
+    requested: number;
+    available: number;
+    canStart: boolean;
+    hasEnough: boolean;
+    message: string;
+  } | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+  const [isStartingEngine, setIsStartingEngine] = useState(false);
+  const [insufficientPromptCount, setInsufficientPromptCount] = useState<number | null>(null);
 
   // Timer interval ref
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. Load initial simulations and history
+  // 1. Load initial simulations, history and taxonomy from database
   const loadSimulationsData = async () => {
     try {
       setLoadingInitial(true);
-      const [sims, hist] = await Promise.all([
+      const [sims, hist, eList, oList, pList, bList, sList, stList] = await Promise.all([
         ApiService.getSimulations().catch(() => []),
-        ApiService.getSimulationHistory().catch(() => [])
+        ApiService.getSimulationHistory().catch(() => []),
+        ApiService.getExams().catch(() => []),
+        ApiService.getOrganizations().catch(() => []),
+        ApiService.getPositions().catch(() => []),
+        ApiService.getBoards().catch(() => []),
+        ApiService.getSubjects().catch(() => []),
+        ApiService.getSubjectsTopics().catch(() => [])
       ]);
-      setAvailableSimulations(sims);
-      setHistory(hist);
+      setAvailableSimulations(sims || []);
+      setHistory(hist || []);
+      setExams(eList || []);
+      setOrganizations(oList || []);
+      setPositions(pList || []);
+      setBoards(bList || []);
+      setSubjects(sList || []);
+      setSubjectsTopics(stList || []);
     } catch (e) {
       console.error(e);
     } finally {
@@ -111,19 +144,51 @@ export const SimulationView: React.FC = () => {
     if (savedLocal) {
       try {
         const parsed: ActiveSessionData = JSON.parse(savedLocal);
-        // Calculate remaining seconds
-        if (parsed.expiresAt) {
-          const diffSeconds = Math.max(
-            0,
-            Math.floor((new Date(parsed.expiresAt).getTime() - Date.now()) / 1000)
-          );
-          if (diffSeconds > 0) {
-            setActiveSession(parsed);
-            setTimeRemainingSeconds(diffSeconds);
-            setViewState('taking');
-          } else {
-            localStorage.removeItem('aprova_plus_active_session');
-          }
+        // Validar e sincronizar com o servidor em tempo real (Requisito 17)
+        if (parsed.sessionId) {
+          ApiService.getSimulationSession(parsed.sessionId)
+            .then((serverData) => {
+              if (serverData?.session?.status === 'in_progress') {
+                const diff = serverData.session.remainingSeconds || 0;
+                if (diff > 0) {
+                  // Mapear respostas salvas no PostgreSQL
+                  const answersMap: Record<string, string> = {};
+                  const markedMap: Record<string, boolean> = {};
+                  (serverData.answers || []).forEach((a: any) => {
+                    if (a.selectedOptionLetter) answersMap[a.questionId] = a.selectedOptionLetter;
+                    if (a.isMarkedForReview) markedMap[a.questionId] = true;
+                  });
+                  setActiveSession({
+                    ...parsed,
+                    answers: answersMap,
+                    markedForReview: markedMap,
+                    questions: serverData.questions || parsed.questions,
+                    expiresAt: serverData.session.expiresAt,
+                  });
+                  setTimeRemainingSeconds(diff);
+                  setViewState('taking');
+                  return;
+                }
+              }
+              // Se já foi finalizado ou expirou, limpar
+              localStorage.removeItem('aprova_plus_active_session');
+            })
+            .catch(() => {
+              // Fallback local se estiver offline
+              if (parsed.expiresAt) {
+                const diffSeconds = Math.max(
+                  0,
+                  Math.floor((new Date(parsed.expiresAt).getTime() - Date.now()) / 1000)
+                );
+                if (diffSeconds > 0) {
+                  setActiveSession(parsed);
+                  setTimeRemainingSeconds(diffSeconds);
+                  setViewState('taking');
+                } else {
+                  localStorage.removeItem('aprova_plus_active_session');
+                }
+              }
+            });
         }
       } catch (e) {
         localStorage.removeItem('aprova_plus_active_session');
@@ -217,30 +282,87 @@ export const SimulationView: React.FC = () => {
     }
   };
 
-  // Start a Custom Simulation
-  const handleStartCustom = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Check preview whenever configurator filters or selected count change
+  const handleCheckPreview = async (overrideCount?: number) => {
     try {
-      setIsStartingCustom(true);
-      const distConfig: Record<string, number> = {};
-      if (distPortuguese > 0) distConfig['sub-portugues'] = distPortuguese;
-      if (distMath > 0) distConfig['sub-matematica'] = distMath;
-      if (distElectrical > 0) distConfig['sub-eletrotecnica'] = distElectrical;
+      setIsPreviewLoading(true);
+      const countToCheck = overrideCount !== undefined ? overrideCount : selectedCount;
+      const res = await ApiService.previewSimulation({
+        requestedCount: countToCheck,
+        examId: filterContest !== 'Todos' ? filterContest : undefined,
+        organizationId: filterOrg !== 'Todos' ? filterOrg : undefined,
+        positionId: filterPosition !== 'Todos' ? filterPosition : undefined,
+        boardId: filterBoard !== 'Todas' ? filterBoard : undefined,
+        subjectId: filterDiscipline !== 'Todas' ? filterDiscipline : undefined,
+        difficulty: filterDifficulty !== 'Todas' ? filterDifficulty : undefined,
+        year: filterYear !== 'Todos' ? Number(filterYear) : undefined,
+      });
+      setPreviewData(res);
+      return res;
+    } catch (err) {
+      console.error(err);
+      return null;
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  };
 
-      const sumQuestions = distPortuguese + distMath + distElectrical;
+  useEffect(() => {
+    if (viewState === 'config') {
+      handleCheckPreview();
+    }
+  }, [
+    viewState,
+    simMode,
+    selectedCount,
+    filterContest,
+    filterOrg,
+    filterPosition,
+    filterBoard,
+    filterDiscipline,
+    filterDifficulty,
+    filterYear
+  ]);
+
+  // Start Simulation from Configurator Engine
+  const handleStartEngine = async (overrideCount?: number) => {
+    try {
+      setIsStartingEngine(true);
+      const countToUse = overrideCount !== undefined ? overrideCount : selectedCount;
+
+      let generatedTitle = configTitle.trim();
+      if (!generatedTitle || generatedTitle === 'Simulado Livre APROVA+' || generatedTitle === 'Simulado Personalizado Transpetro') {
+        if (simMode === 'contest' && filterContest !== 'Todos') {
+          const ex = exams.find((e) => e.id === filterContest || e.name === filterContest);
+          generatedTitle = `Simulado ${ex?.name || 'Concurso'}`;
+        } else if (simMode === 'discipline' && filterDiscipline !== 'Todas') {
+          const sub = subjects.find((s) => s.id === filterDiscipline || s.name === filterDiscipline);
+          generatedTitle = `Simulado Foco em ${sub?.name || 'Disciplina'}`;
+        } else if (simMode === 'free') {
+          generatedTitle = `Simulado Livre (${countToUse} Questões)`;
+        } else {
+          generatedTitle = `Simulado Personalizado (${countToUse} Questões)`;
+        }
+      }
 
       const res = await ApiService.startSimulation({
-        title: configTitle.trim() || 'Simulado Personalizado',
-        totalQuestions: sumQuestions,
-        timeLimitMinutes: configTimeMinutes,
-        distributionConfig: distConfig
+        title: generatedTitle,
+        totalQuestions: countToUse,
+        timeLimitMinutes: selectedDuration,
+        examId: filterContest !== 'Todos' ? filterContest : undefined,
+        organizationId: filterOrg !== 'Todos' ? filterOrg : undefined,
+        positionId: filterPosition !== 'Todos' ? filterPosition : undefined,
+        boardId: filterBoard !== 'Todas' ? filterBoard : undefined,
+        subjectId: filterDiscipline !== 'Todas' ? filterDiscipline : undefined,
+        difficulty: filterDifficulty !== 'Todas' ? filterDifficulty : undefined,
+        year: filterYear !== 'Todos' ? Number(filterYear) : undefined,
       });
 
       const sessionData: ActiveSessionData = {
         sessionId: res.session.id,
-        simulationTitle: configTitle.trim() || 'Simulado Personalizado',
+        simulationTitle: generatedTitle,
         totalQuestions: res.questions.length,
-        timeLimitMinutes: configTimeMinutes,
+        timeLimitMinutes: selectedDuration,
         questions: res.questions,
         answers: {},
         markedForReview: {},
@@ -256,13 +378,15 @@ export const SimulationView: React.FC = () => {
       );
 
       setActiveSession(sessionData);
-      setTimeRemainingSeconds(remainingSecs > 0 ? remainingSecs : configTimeMinutes * 60);
+      setTimeRemainingSeconds(remainingSecs > 0 ? remainingSecs : selectedDuration * 60);
       setViewState('taking');
-      showToast('Simulado Personalizado Iniciado!', undefined, 'success');
+      setInsufficientPromptCount(null);
+      showToast('Simulado Iniciado!', `${res.questions.length} questões carregadas com sucesso. Boa prova!`, 'success');
     } catch (e: any) {
-      showToast('Erro ao criar simulado', e.message || 'Tente novamente', 'error');
+      console.error(e);
+      showToast('Erro ao iniciar simulado', e.message || 'Verifique sua conexão', 'error');
     } finally {
-      setIsStartingCustom(false);
+      setIsStartingEngine(false);
     }
   };
 
@@ -1080,125 +1204,308 @@ export const SimulationView: React.FC = () => {
         </div>
       </div>
 
-      {/* VIEW: CONFIG FORM */}
+      {/* VIEW: CONFIG FORM (Prompt 11, Requisitos 12, 13 e 14) */}
       {viewState === 'config' && (
         <Card className="p-6 md:p-8 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm space-y-6 animate-in fade-in">
           <div>
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white">
-              Configurador de Simulado Sob Medida
+            <h2 className="text-xl font-black text-slate-900 dark:text-white">
+              Configurador do Motor de Simulados
             </h2>
-            <p className="text-xs text-slate-500">
-              Escolha as disciplinas e a proporção de questões para seu treino direcionado.
+            <p className="text-xs md:text-sm text-slate-500">
+              Personalize quantidade, modalidade e filtros pedagógicos com verificação de acervo em tempo real.
             </p>
           </div>
 
-          <form onSubmit={handleStartCustom} className="space-y-5">
-            <div>
-              <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                Título do Simulado
-              </label>
-              <input
-                type="text"
-                value={configTitle}
-                onChange={(e) => setConfigTitle(e.target.value)}
-                placeholder="Ex: Simulado Foco Eletrotécnica Cesgranrio"
-                className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-white"
-              />
+          {/* 1. Modalidades de Simulado (Requisito 12) */}
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 block">
+              Modalidade do Simulado:
+            </label>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                { id: 'free', label: 'Simulado Livre', desc: 'Todo o acervo do banco' },
+                { id: 'contest', label: 'Por Concurso', desc: 'Foco no edital e banca' },
+                { id: 'discipline', label: 'Por Disciplina', desc: 'Foco em matéria / assunto' },
+                { id: 'custom', label: 'Personalizado', desc: 'Combinação avançada livre' },
+              ].map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    setSimMode(m.id as any);
+                    if (m.id === 'free') {
+                      setFilterContest('Todos');
+                      setFilterDiscipline('Todas');
+                    }
+                  }}
+                  className={`p-3 rounded-xl border text-left transition-all ${
+                    simMode === m.id
+                      ? 'bg-primary-50 dark:bg-primary-950/60 border-primary-500 text-primary-900 dark:text-primary-100 shadow-xs ring-1 ring-primary-500'
+                      : 'bg-white dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-slate-300'
+                  }`}
+                >
+                  <span className="font-bold text-xs block">{m.label}</span>
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400 block mt-0.5">{m.desc}</span>
+                </button>
+              ))}
             </div>
+          </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* 2. Quantidade de Questões (Prompt 11: 5, 10, 20, 30, 50) */}
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 block">
+              Quantidade de Questões:
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {[5, 10, 20, 30, 50].map((countVal) => (
+                <button
+                  key={countVal}
+                  type="button"
+                  onClick={() => setSelectedCount(countVal)}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all ${
+                    selectedCount === countVal
+                      ? 'bg-primary-600 text-white border-primary-600 shadow-xs'
+                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  {countVal} questões
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 3. Tempo Limite */}
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 block">
+              Tempo Limite de Prova:
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { min: 15, label: '15 minutos (Sprint)' },
+                { min: 30, label: '30 minutos (Padrão)' },
+                { min: 60, label: '60 minutos (1 hora)' },
+                { min: 120, label: '120 minutos (2 horas)' },
+              ].map((t) => (
+                <button
+                  key={t.min}
+                  type="button"
+                  onClick={() => setSelectedDuration(t.min)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
+                    selectedDuration === t.min
+                      ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white font-bold'
+                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 4. Filtros Específicos por Modalidade */}
+          <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 space-y-4">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 block">
+              Filtros Pedagógicos:
+            </span>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              {/* Concurso (Concurso, Custom) */}
+              {(simMode === 'contest' || simMode === 'custom') && (
+                <div>
+                  <label className="font-semibold text-slate-600 dark:text-slate-300 block mb-1">
+                    Concurso
+                  </label>
+                  <select
+                    value={filterContest}
+                    onChange={(e) => setFilterContest(e.target.value)}
+                    className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
+                  >
+                    <option value="Todos">Todos os Concursos</option>
+                    {exams.map((ex) => (
+                      <option key={ex.id} value={ex.id}>
+                        {ex.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Banca (Concurso, Custom) */}
+              {(simMode === 'contest' || simMode === 'custom') && (
+                <div>
+                  <label className="font-semibold text-slate-600 dark:text-slate-300 block mb-1">
+                    Banca Examinadora
+                  </label>
+                  <select
+                    value={filterBoard}
+                    onChange={(e) => setFilterBoard(e.target.value)}
+                    className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
+                  >
+                    <option value="Todas">Todas as Bancas</option>
+                    {boards.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.sigla})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Disciplina (Discipline, Custom) */}
+              {(simMode === 'discipline' || simMode === 'custom') && (
+                <div>
+                  <label className="font-semibold text-slate-600 dark:text-slate-300 block mb-1">
+                    Disciplina
+                  </label>
+                  <select
+                    value={filterDiscipline}
+                    onChange={(e) => setFilterDiscipline(e.target.value)}
+                    className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
+                  >
+                    <option value="Todas">Todas as Disciplinas</option>
+                    {subjects.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Dificuldade (Todos os modos) */}
               <div>
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                  Tempo Limite de Prova
+                <label className="font-semibold text-slate-600 dark:text-slate-300 block mb-1">
+                  Nível de Dificuldade
                 </label>
                 <select
-                  value={configTimeMinutes}
-                  onChange={(e) => setConfigTimeMinutes(Number(e.target.value))}
-                  className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-white"
+                  value={filterDifficulty}
+                  onChange={(e) => setFilterDifficulty(e.target.value)}
+                  className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
                 >
-                  <option value={15}>15 minutos (Simulado Rápido)</option>
-                  <option value={30}>30 minutos (Padrão)</option>
-                  <option value={60}>60 minutos (1 hora)</option>
-                  <option value={120}>120 minutos (2 horas)</option>
+                  <option value="Todas">Qualquer Dificuldade</option>
+                  <option value="Fácil">Fácil</option>
+                  <option value="Médio">Médio</option>
+                  <option value="Difícil">Difícil</option>
                 </select>
               </div>
 
+              {/* Ano */}
               <div>
-                <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                  Total de Questões Selecionadas
+                <label className="font-semibold text-slate-600 dark:text-slate-300 block mb-1">
+                  Ano da Questão
                 </label>
-                <div className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800 font-bold text-sm text-primary-600">
-                  {distPortuguese + distMath + distElectrical} questões
-                </div>
+                <select
+                  value={filterYear}
+                  onChange={(e) => setFilterYear(e.target.value)}
+                  className="w-full p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
+                >
+                  <option value="Todos">Todos os Anos</option>
+                  <option value="2024">2024</option>
+                  <option value="2023">2023</option>
+                  <option value="2022">2022</option>
+                </select>
               </div>
             </div>
+          </div>
 
-            {/* Distribution Inputs */}
-            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3">
-              <span className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider block">
-                Distribuição de Questões por Matéria:
-              </span>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs text-slate-600 dark:text-slate-400 block mb-1">
-                    Língua Portuguesa
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={20}
-                    value={distPortuguese}
-                    onChange={(e) => setDistPortuguese(Number(e.target.value))}
-                    className="w-full p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-slate-600 dark:text-slate-400 block mb-1">
-                    Matemática
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={20}
-                    value={distMath}
-                    onChange={(e) => setDistMath(Number(e.target.value))}
-                    className="w-full p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-slate-600 dark:text-slate-400 block mb-1">
-                    Eletrotécnica & Circuitos
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={distElectrical}
-                    onChange={(e) => setDistElectrical(Number(e.target.value))}
-                    className="w-full p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
-                  />
-                </div>
+          {/* 5. Prévia de Disponibilidade em Tempo Real (Requisito 13) */}
+          <div className="pt-1">
+            {isPreviewLoading ? (
+              <div className="p-4 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center gap-3 text-xs text-slate-500">
+                <div className="w-4 h-4 rounded-full border-2 border-primary-600 border-t-transparent animate-spin" />
+                <span>Verificando acervo real no banco de dados PostgreSQL...</span>
               </div>
-            </div>
+            ) : previewData ? (
+              previewData.available === 0 ? (
+                <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 flex items-start gap-3">
+                  <XCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block font-bold">Nenhuma questão encontrada</strong>
+                    <span>Não há questões publicadas cadastradas com estes filtros específicos. Altere os filtros acima para prosseguir.</span>
+                  </div>
+                </div>
+              ) : previewData.available < selectedCount ? (
+                <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-bold">Acervo parcial disponível</strong>
+                      <p className="mt-0.5">
+                        Você solicitou <strong>{selectedCount} questões</strong>. Encontramos apenas{' '}
+                        <strong>{previewData.available} questões disponíveis</strong> com os filtros selecionados.
+                      </p>
+                    </div>
+                  </div>
 
-            <div className="flex justify-end gap-3 pt-2">
-              <Button type="button" variant="outline" size="sm" onClick={() => setViewState('list')}>
-                Cancelar
-              </Button>
-              <Button
-                type="submit"
-                variant="primary"
-                size="md"
-                disabled={isStartingCustom}
-                className="font-bold px-6"
-              >
-                {isStartingCustom ? 'Gerando Caderno...' : 'Iniciar Simulado Agora'}
-              </Button>
-            </div>
-          </form>
+                  {/* 3 Opções Exigidas no Requisito 13 */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <Button
+                      type="button"
+                      variant="primary"
+                      size="sm"
+                      onClick={() => handleStartEngine(previewData.available)}
+                      disabled={isStartingEngine}
+                      className="bg-amber-600 hover:bg-amber-700 text-white font-bold"
+                    >
+                      {isStartingEngine ? 'Iniciando...' : `Iniciar com ${previewData.available} questões`}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setFilterDifficulty('Todas');
+                        setFilterYear('Todos');
+                        setFilterBoard('Todas');
+                      }}
+                    >
+                      Ampliar filtros
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setViewState('list')}
+                    >
+                      Cancelar
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-200 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      <strong>{previewData.available} questões publicadas</strong> prontas para geração do caderno.
+                    </span>
+                  </div>
+                  <Badge variant="success" size="sm">Acervo Suficiente</Badge>
+                </div>
+              )
+            ) : null}
+          </div>
+
+          {/* Botões de Ação */}
+          <div className="flex justify-end gap-3 pt-4 border-t border-slate-100 dark:border-slate-800">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setViewState('list')}
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              size="md"
+              disabled={isStartingEngine || !previewData || previewData.available === 0}
+              onClick={() => handleStartEngine()}
+              className="font-bold px-6 bg-primary-600 text-white shadow-md shadow-primary-600/30"
+            >
+              {isStartingEngine ? 'Gerando Caderno...' : `Iniciar Simulado (${selectedCount} questões)`}
+            </Button>
+          </div>
         </Card>
       )}
 

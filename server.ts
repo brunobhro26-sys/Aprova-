@@ -53,7 +53,7 @@ import { gamificationRouter } from './src/routes/gamificationRoutes.ts';
 import { subscriptionRouter } from './src/routes/subscriptionRoutes.ts';
 import { lgpdRouter } from './src/routes/lgpdRoutes.ts';
 import { GamificationService } from './src/services/gamificationService.ts';
-import { eq, and, sql, desc, ilike } from 'drizzle-orm';
+import { eq, and, or, sql, desc, ilike, count, inArray } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
 
 const app = express();
@@ -489,56 +489,124 @@ app.get('/api/topics', async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// 7. BANCO DE QUESTÕES (QUESTIONS) COM FILTROS RELACIONAIS
+// 7. BANCO DE QUESTÕES (QUESTIONS) COM FILTROS RELACIONAIS & PAGINAÇÃO
 // -------------------------------------------------------------
 app.get('/api/questions', async (req, res) => {
   try {
     const {
+      page = '1',
+      limit = '20',
       organizationId,
       examId,
       positionId,
       boardId,
       subjectId,
+      discipline,
       subjectTopicId,
       topicId,
+      topic,
       difficulty,
       type,
-      search
+      year,
+      status,
+      search,
+      format,
     } = req.query;
 
     const conditions = [eq(questions.active, true)];
 
-    if (organizationId) conditions.push(eq(questions.organizationId, String(organizationId)));
-    if (examId) conditions.push(eq(questions.examId, String(examId)));
-    if (positionId) conditions.push(eq(questions.positionId, String(positionId)));
-    if (boardId) conditions.push(eq(questions.boardId, String(boardId)));
-    if (subjectId) conditions.push(eq(questions.subjectId, String(subjectId)));
-    if (subjectTopicId) conditions.push(eq(questions.subjectTopicId, String(subjectTopicId)));
-    if (topicId) conditions.push(eq(questions.topicId, String(topicId)));
-    if (difficulty) conditions.push(eq(questions.difficulty, String(difficulty)));
-    if (type) conditions.push(eq(questions.type, String(type)));
+    // Role check: non-admins can ONLY view PUBLISHED questions
+    const adminHeader = (req.headers['x-admin-role'] as string) || '';
+    const isAdministrative = ['SUPERADMIN', 'ADMIN', 'CONTENT_EDITOR'].includes(adminHeader);
+
+    if (status && isAdministrative) {
+      if (status !== 'ALL') {
+        conditions.push(eq(questions.status, String(status)));
+      }
+    } else {
+      // Students or public visitors see only PUBLISHED questions
+      conditions.push(eq(questions.status, 'PUBLISHED'));
+    }
+
+    if (organizationId && organizationId !== 'Todos') conditions.push(eq(questions.organizationId, String(organizationId)));
+    if (examId && examId !== 'Todos') conditions.push(eq(questions.examId, String(examId)));
+    if (positionId && positionId !== 'Todos') conditions.push(eq(questions.positionId, String(positionId)));
+    if (boardId && boardId !== 'Todas') conditions.push(eq(questions.boardId, String(boardId)));
+    
+    // Discipline / Subject matching: supports subjectId or name search
+    if (subjectId && subjectId !== 'Todas') {
+      conditions.push(eq(questions.subjectId, String(subjectId)));
+    } else if (discipline && discipline !== 'Todas') {
+      const [matchedSubject] = await db
+        .select()
+        .from(subjects)
+        .where(or(eq(subjects.id, String(discipline)), ilike(subjects.name, `%${String(discipline)}%`)));
+      if (matchedSubject) {
+        conditions.push(eq(questions.subjectId, matchedSubject.id));
+      } else {
+        conditions.push(ilike(questions.subjectId, `%${String(discipline)}%`));
+      }
+    }
+
+    if (subjectTopicId && subjectTopicId !== 'Todos') conditions.push(eq(questions.subjectTopicId, String(subjectTopicId)));
+    
+    if (topicId && topicId !== 'Todos') {
+      conditions.push(eq(questions.topicId, String(topicId)));
+    } else if (topic && topic !== 'Todos') {
+      const [matchedTopic] = await db
+        .select()
+        .from(topics)
+        .where(or(eq(topics.id, String(topic)), ilike(topics.name, `%${String(topic)}%`)));
+      if (matchedTopic) {
+        conditions.push(eq(questions.topicId, matchedTopic.id));
+      }
+    }
+
+    if (difficulty && difficulty !== 'Todas') conditions.push(eq(questions.difficulty, String(difficulty)));
+    if (type && type !== 'Todos') conditions.push(eq(questions.type, String(type)));
+    if (year && year !== 'Todos') conditions.push(eq(questions.year, Number(year)));
     if (search) conditions.push(ilike(questions.statement, `%${String(search)}%`));
+
+    // Total count for real pagination
+    const [totalCountResult] = await db
+      .select({ count: count() })
+      .from(questions)
+      .where(and(...conditions));
+    
+    const totalCount = Number(totalCountResult?.count || 0);
+
+    const pageNum = Math.max(1, Number(page || 1));
+    const isAll = limit === 'all';
+    const limitNum = isAll ? 1000 : Math.max(1, Number(limit || 20));
+    const offsetNum = (pageNum - 1) * limitNum;
 
     const resultQuestions = await db
       .select()
       .from(questions)
       .where(and(...conditions))
-      .orderBy(desc(questions.createdAt));
+      .orderBy(desc(questions.createdAt))
+      .limit(limitNum)
+      .offset(offsetNum);
 
-    // Fetch alternatives for each question
+    // Fetch alternatives for these questions
     const questionIds = resultQuestions.map((q) => q.id);
     let alternativesMap: Record<string, any[]> = {};
 
     if (questionIds.length > 0) {
       const allAlternatives = await db
         .select()
-        .from(questionAlternatives);
+        .from(questionAlternatives)
+        .where(sql`${questionAlternatives.questionId} IN (${sql.join(questionIds.map((id) => sql`${id}`), sql`, `)})`);
 
       for (const alt of allAlternatives) {
         if (!alternativesMap[alt.questionId]) {
           alternativesMap[alt.questionId] = [];
         }
-        alternativesMap[alt.questionId].push(alt);
+        // If not administrative, do NOT expose isCorrect
+        const sanitizedAlt = isAdministrative
+          ? alt
+          : { ...alt, isCorrect: undefined };
+        alternativesMap[alt.questionId].push(sanitizedAlt);
       }
     }
 
@@ -547,10 +615,104 @@ app.get('/api/questions', async (req, res) => {
       alternatives: (alternativesMap[q.id] || []).sort((a, b) => a.orderIndex - b.orderIndex)
     }));
 
-    res.json(payload);
+    if (format === 'array') {
+      return res.json(payload);
+    }
+
+    res.json({
+      questions: payload,
+      total: totalCount,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(totalCount / limitNum) || 1,
+    });
   } catch (error) {
     console.error('Error fetching questions:', error);
     res.status(500).json({ error: 'Failed to fetch questions' });
+  }
+});
+
+// Diagnóstico em Tempo Real do Banco de Questões (Prompt 11, Requisitos 2 & 28)
+app.get('/api/questions/diagnostics', async (_req, res) => {
+  try {
+    const [totalQ] = await db.select({ count: count() }).from(questions);
+    const byStatus = await db.select({ status: questions.status, count: count() }).from(questions).groupBy(questions.status);
+
+    const bySubject = await db
+      .select({
+        subjectId: questions.subjectId,
+        subjectName: subjects.name,
+        count: count(),
+      })
+      .from(questions)
+      .leftJoin(subjects, eq(questions.subjectId, subjects.id))
+      .groupBy(questions.subjectId, subjects.name);
+
+    const byBoard = await db
+      .select({
+        boardId: questions.boardId,
+        boardName: boards.name,
+        sigla: boards.sigla,
+        count: count(),
+      })
+      .from(questions)
+      .leftJoin(boards, eq(questions.boardId, boards.id))
+      .groupBy(questions.boardId, boards.name, boards.sigla);
+
+    const byDifficulty = await db
+      .select({
+        difficulty: questions.difficulty,
+        count: count(),
+      })
+      .from(questions)
+      .groupBy(questions.difficulty);
+
+    const [totalSims] = await db.select({ count: count() }).from(simulationSessions);
+    const [completedSims] = await db.select({ count: count() }).from(simulationSessions).where(eq(simulationSessions.status, 'completed'));
+    const [inProgressSims] = await db.select({ count: count() }).from(simulationSessions).where(eq(simulationSessions.status, 'in_progress'));
+
+    const withoutAlts = await db.execute(sql`SELECT q.id FROM questions q LEFT JOIN question_alternatives a ON q.id = a.question_id GROUP BY q.id HAVING count(a.id) = 0`);
+    const withoutCorrect = await db.execute(sql`SELECT q.id FROM questions q LEFT JOIN question_alternatives a ON q.id = a.question_id AND a.is_correct = true GROUP BY q.id HAVING count(a.id) = 0`);
+
+    const statusMap: Record<string, number> = {};
+    byStatus.forEach((s) => {
+      statusMap[s.status] = Number(s.count);
+    });
+
+    res.json({
+      totalQuestions: Number(totalQ?.count || 0),
+      published: statusMap['PUBLISHED'] || 0,
+      draft: statusMap['DRAFT'] || 0,
+      review: statusMap['REVIEW'] || 0,
+      archived: statusMap['ARCHIVED'] || 0,
+      bySubject: bySubject.map((s) => ({
+        id: s.subjectId,
+        name: s.subjectName || 'Geral',
+        count: Number(s.count),
+      })),
+      byBoard: byBoard.map((b) => ({
+        id: b.boardId,
+        name: b.boardName || b.sigla || 'Outras',
+        count: Number(b.count),
+      })),
+      byDifficulty: byDifficulty.map((d) => ({
+        difficulty: d.difficulty,
+        count: Number(d.count),
+      })),
+      quality: {
+        withoutAlternatives: withoutAlts.rows.length,
+        withoutCorrectAnswer: withoutCorrect.rows.length,
+        isHealthy: withoutAlts.rows.length === 0 && withoutCorrect.rows.length === 0,
+      },
+      simulations: {
+        total: Number(totalSims?.count || 0),
+        completed: Number(completedSims?.count || 0),
+        inProgress: Number(inProgressSims?.count || 0),
+      },
+    });
+  } catch (error) {
+    console.error('Error getting diagnostics:', error);
+    res.status(500).json({ error: 'Failed to get diagnostics' });
   }
 });
 
@@ -597,15 +759,128 @@ app.get('/api/questions/:id', async (req, res) => {
     const [question] = await db.select().from(questions).where(eq(questions.id, id));
     if (!question) return res.status(404).json({ error: 'Questão não encontrada' });
 
-    const alternatives = await db
+    const adminHeader = (req.headers['x-admin-role'] as string) || '';
+    const isAdministrative = ['SUPERADMIN', 'ADMIN', 'CONTENT_EDITOR'].includes(adminHeader);
+
+    const rawAlternatives = await db
       .select()
       .from(questionAlternatives)
       .where(eq(questionAlternatives.questionId, id))
       .orderBy(questionAlternatives.orderIndex);
 
+    // Ocultar isCorrect para estudantes antes da resolução para evitar trapaça via console/devtools
+    const alternatives = isAdministrative
+      ? rawAlternatives
+      : rawAlternatives.map((a) => ({
+          id: a.id,
+          questionId: a.questionId,
+          letter: a.letter,
+          text: a.text,
+          orderIndex: a.orderIndex,
+        }));
+
     res.json({ ...question, alternatives });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch question' });
+  }
+});
+
+// Atualizar Questão e Alternativas (Admin)
+app.put('/api/questions/:id', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      statement,
+      year,
+      boardId,
+      examId,
+      organizationId,
+      positionId,
+      subjectId,
+      subjectTopicId,
+      topicId,
+      difficulty,
+      type,
+      explanation,
+      bibliographicReference,
+      status,
+      alternatives
+    } = req.body;
+
+    const [updated] = await db
+      .update(questions)
+      .set({
+        statement,
+        year: year ? Number(year) : undefined,
+        boardId,
+        examId: examId || null,
+        organizationId: organizationId || null,
+        positionId: positionId || null,
+        subjectId,
+        subjectTopicId: subjectTopicId || null,
+        topicId: topicId || null,
+        difficulty: difficulty || 'Médio',
+        type: type || 'Múltipla Escolha',
+        explanation,
+        bibliographicReference,
+        status: status || 'PUBLISHED',
+        updatedAt: new Date(),
+      })
+      .where(eq(questions.id, id))
+      .returning();
+
+    if (Array.isArray(alternatives) && alternatives.length > 0) {
+      for (const alt of alternatives) {
+        if (alt.id) {
+          await db
+            .update(questionAlternatives)
+            .set({
+              letter: alt.letter,
+              text: alt.text,
+              isCorrect: !!alt.isCorrect,
+            })
+            .where(eq(questionAlternatives.id, alt.id));
+        }
+      }
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating question:', error);
+    res.status(500).json({ error: 'Failed to update question' });
+  }
+});
+
+// Alterar Status da Questão (PUBLISHED, DRAFT, REVIEW, ARCHIVED)
+app.patch('/api/questions/:id/status', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!status) return res.status(400).json({ error: 'Status é obrigatório' });
+
+    const [updated] = await db
+      .update(questions)
+      .set({ status, updatedAt: new Date() })
+      .where(eq(questions.id, id))
+      .returning();
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating question status:', error);
+    res.status(500).json({ error: 'Failed to update question status' });
+  }
+});
+
+// Excluir Questão
+app.delete('/api/questions/:id', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { id } = req.params;
+    await db.delete(questionAlternatives).where(eq(questionAlternatives.questionId, id));
+    await db.delete(questions).where(eq(questions.id, id));
+    res.json({ success: true, message: 'Questão excluída com sucesso' });
+  } catch (error) {
+    console.error('Error deleting question:', error);
+    res.status(500).json({ error: 'Failed to delete question' });
   }
 });
 
@@ -1318,38 +1593,138 @@ app.post('/api/simulations', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// Iniciar Simulado (Cria sessão com cronômetro server-authoritative)
+// Pré-visualização da Disponibilidade de Questões para Simulado (Prompt 11, Requisito 13)
+app.post('/api/simulations/preview', async (req, res) => {
+  try {
+    const { requestedCount = 20, examId, organizationId, boardId, positionId, subjectId, difficulty, year } = req.body;
+    
+    const conditions = [
+      eq(questions.active, true),
+      eq(questions.status, 'PUBLISHED')
+    ];
+
+    if (examId && examId !== 'Todos') conditions.push(eq(questions.examId, String(examId)));
+    if (organizationId && organizationId !== 'Todos') conditions.push(eq(questions.organizationId, String(organizationId)));
+    if (boardId && boardId !== 'Todas') conditions.push(eq(questions.boardId, String(boardId)));
+    if (positionId && positionId !== 'Todos') conditions.push(eq(questions.positionId, String(positionId)));
+    if (subjectId && subjectId !== 'Todas') {
+      const [subj] = await db.select().from(subjects).where(or(eq(subjects.id, String(subjectId)), ilike(subjects.name, `%${String(subjectId)}%`)));
+      if (subj) conditions.push(eq(questions.subjectId, subj.id));
+    }
+    if (difficulty && difficulty !== 'Todas') conditions.push(eq(questions.difficulty, String(difficulty)));
+    if (year && year !== 'Todos') conditions.push(eq(questions.year, Number(year)));
+
+    const matching = await db.select({ id: questions.id }).from(questions).where(and(...conditions));
+    const available = matching.length;
+    const requested = Number(requestedCount || 20);
+
+    res.json({
+      requested,
+      available,
+      canStart: available > 0,
+      hasEnough: available >= requested,
+      message: available === 0
+        ? 'Nenhuma questão publicada encontrada com estes filtros. Altere os filtros para prosseguir.'
+        : available < requested
+        ? `Você solicitou ${requested} questões. Encontramos apenas ${available} questões disponíveis com os filtros selecionados.`
+        : `Encontradas ${available} questões publicadas prontas para o simulado.`
+    });
+  } catch (error) {
+    console.error('Error previewing simulation:', error);
+    res.status(500).json({ error: 'Failed to preview simulation' });
+  }
+});
+
+// Iniciar Simulado (Cria sessão com cronômetro server-authoritative e snapshot imutável)
 app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) => {
   try {
     const userId = req.user?.uid || 'user-bruno-student';
-    const { simulationId, title, totalQuestions, timeLimitMinutes, distributionConfig, examId, boardId, positionId } = req.body;
+    const {
+      simulationId,
+      title,
+      totalQuestions,
+      timeLimitMinutes,
+      distributionConfig,
+      examId,
+      organizationId,
+      boardId,
+      positionId,
+      subjectId,
+      difficulty,
+      year,
+    } = req.body;
 
     let selectedQuestions: any[] = [];
+    const existingIds = new Set<string>();
 
-    // Se houver distribuição por disciplina definida (ex: 5 Português, 5 Matemática, 10 Eletrotécnica)
-    if (distributionConfig && typeof distributionConfig === 'object') {
-      for (const [subjectName, count] of Object.entries(distributionConfig)) {
-        const [subj] = await db.select().from(subjects).where(ilike(subjects.name, `%${subjectName}%`));
+    let parsedDist: Record<string, number> | null = null;
+    if (typeof distributionConfig === 'string') {
+      try { parsedDist = JSON.parse(distributionConfig); } catch (e) {}
+    } else if (typeof distributionConfig === 'object' && distributionConfig !== null) {
+      parsedDist = distributionConfig;
+    }
+
+    // 1. Se houver distribuição por disciplina configurada
+    if (parsedDist && Object.keys(parsedDist).length > 0) {
+      for (const [key, countVal] of Object.entries(parsedDist)) {
+        const numCount = Number(countVal || 0);
+        if (numCount <= 0) continue;
+
+        // Tentar encontrar disciplina por ID, nome ou sigla
+        const [subj] = await db
+          .select()
+          .from(subjects)
+          .where(or(eq(subjects.id, key), ilike(subjects.name, `%${key}%`), ilike(subjects.sigla, `%${key}%`)));
+
+        const subConditions = [
+          eq(questions.active, true),
+          eq(questions.status, 'PUBLISHED'),
+        ];
+
         if (subj) {
-          const qList = await db
-            .select()
-            .from(questions)
-            .where(and(eq(questions.active, true), eq(questions.subjectId, subj.id)))
-            .limit(Number(count));
-          selectedQuestions.push(...qList);
+          subConditions.push(eq(questions.subjectId, subj.id));
+        } else {
+          subConditions.push(ilike(questions.subjectId, `%${key}%`));
+        }
+
+        if (examId && examId !== 'Todos') subConditions.push(eq(questions.examId, String(examId)));
+        if (organizationId && organizationId !== 'Todos') subConditions.push(eq(questions.organizationId, String(organizationId)));
+        if (boardId && boardId !== 'Todas') subConditions.push(eq(questions.boardId, String(boardId)));
+
+        const qList = await db
+          .select()
+          .from(questions)
+          .where(and(...subConditions))
+          .limit(numCount);
+
+        for (const q of qList) {
+          if (!existingIds.has(q.id)) {
+            existingIds.add(q.id);
+            selectedQuestions.push(q);
+          }
         }
       }
     }
 
-    // Se faltarem questões para atingir o total, buscar adicionais ativas
+    // 2. Se faltarem questões para atingir o total solicitado, buscar do pool geral respeitando filtros
     const targetTotal = Number(totalQuestions || 20);
     if (selectedQuestions.length < targetTotal) {
       const needed = targetTotal - selectedQuestions.length;
-      const existingIds = selectedQuestions.map((q) => q.id);
-      const conditions = [eq(questions.active, true)];
-      if (examId) conditions.push(eq(questions.examId, examId));
-      if (boardId) conditions.push(eq(questions.boardId, boardId));
-      if (positionId) conditions.push(eq(questions.positionId, positionId));
+      const conditions = [
+        eq(questions.active, true),
+        eq(questions.status, 'PUBLISHED')
+      ];
+
+      if (subjectId && subjectId !== 'Todas') {
+        const [subj] = await db.select().from(subjects).where(or(eq(subjects.id, String(subjectId)), ilike(subjects.name, `%${String(subjectId)}%`)));
+        if (subj) conditions.push(eq(questions.subjectId, subj.id));
+      }
+      if (examId && examId !== 'Todos') conditions.push(eq(questions.examId, String(examId)));
+      if (organizationId && organizationId !== 'Todos') conditions.push(eq(questions.organizationId, String(organizationId)));
+      if (boardId && boardId !== 'Todas') conditions.push(eq(questions.boardId, String(boardId)));
+      if (positionId && positionId !== 'Todos') conditions.push(eq(questions.positionId, String(positionId)));
+      if (difficulty && difficulty !== 'Todas') conditions.push(eq(questions.difficulty, String(difficulty)));
+      if (year && year !== 'Todos') conditions.push(eq(questions.year, Number(year)));
 
       const extra = await db
         .select()
@@ -1358,19 +1733,37 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
         .limit(needed * 2);
 
       for (const eqItem of extra) {
-        if (!existingIds.includes(eqItem.id) && selectedQuestions.length < targetTotal) {
+        if (!existingIds.has(eqItem.id) && selectedQuestions.length < targetTotal) {
+          existingIds.add(eqItem.id);
           selectedQuestions.push(eqItem);
-          existingIds.push(eqItem.id);
         }
       }
     }
 
-    // Fallback: se o banco ainda tiver menos que o solicitado, usar todas as disponíveis
-    if (selectedQuestions.length === 0) {
-      selectedQuestions = await db.select().from(questions).where(eq(questions.active, true)).limit(targetTotal);
+    // Se nenhum filtro restritivo foi passado e ainda assim selectedQuestions for vazio
+    const hasAnyFilter = (examId && examId !== 'Todos') || (boardId && boardId !== 'Todas') || (subjectId && subjectId !== 'Todas') || (difficulty && difficulty !== 'Todas');
+    if (selectedQuestions.length === 0 && !hasAnyFilter) {
+      const fallbackList = await db
+        .select()
+        .from(questions)
+        .where(and(eq(questions.active, true), eq(questions.status, 'PUBLISHED')))
+        .limit(targetTotal);
+
+      for (const fq of fallbackList) {
+        if (!existingIds.has(fq.id)) {
+          existingIds.add(fq.id);
+          selectedQuestions.push(fq);
+        }
+      }
     }
 
-    const sessionId = `sess-${Date.now()}`;
+    if (selectedQuestions.length === 0) {
+      return res.status(400).json({
+        error: 'Nenhuma questão publicada encontrada para gerar o simulado com os filtros fornecidos.'
+      });
+    }
+
+    const sessionId = `sess-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const minutes = Number(timeLimitMinutes !== undefined ? timeLimitMinutes : 30);
     const now = new Date();
     const expiresAt = minutes > 0 ? new Date(now.getTime() + minutes * 60 * 1000) : null;
@@ -1396,7 +1789,7 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
       })
       .returning();
 
-    // Inserir respostas preparadas para a sessão
+    // Inserir respostas preparadas para a sessão (snapshot imutável)
     for (let i = 0; i < selectedQuestions.length; i++) {
       await db.insert(simulationAnswers).values({
         sessionId,
@@ -1408,7 +1801,7 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
       });
     }
 
-    // Carregar alternativas das questões selecionadas
+    // Carregar alternativas das questões selecionadas e sanitizar (ocultar isCorrect para o estudante)
     const qIds = selectedQuestions.map((q) => q.id);
     const allAlts = await db
       .select()
@@ -1418,7 +1811,13 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
     const altsMap: Record<string, any[]> = {};
     for (const alt of allAlts) {
       if (!altsMap[alt.questionId]) altsMap[alt.questionId] = [];
-      altsMap[alt.questionId].push(alt);
+      altsMap[alt.questionId].push({
+        id: alt.id,
+        questionId: alt.questionId,
+        letter: alt.letter,
+        text: alt.text,
+        orderIndex: alt.orderIndex,
+      });
     }
 
     const questionsWithAlternatives = selectedQuestions.map((q) => ({
@@ -1567,6 +1966,23 @@ app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req:
 
     if (!session) {
       return res.status(404).json({ error: 'Sessão não encontrada' });
+    }
+
+    // Proteção contra finalização duplicada (Idempotência)
+    if (session.status === 'completed') {
+      return res.json({
+        session,
+        summary: {
+          totalQuestions: session.totalQuestions,
+          totalAnswered: session.totalAnswered,
+          totalCorrect: session.totalCorrect,
+          totalWrong: session.totalWrong,
+          totalBlank: session.totalBlank,
+          scorePercentage: Number(session.scorePercentage),
+          timeSpentSeconds: session.timeSpentSeconds,
+        },
+        message: 'Simulado já corrigido e finalizado anteriormente (idempotente).'
+      });
     }
 
     const answers = await db
@@ -1745,7 +2161,7 @@ app.get('/api/simulations/history', requireAuth, async (req: AuthRequest, res) =
 });
 
 // Resultado Detalhado do Simulado
-app.get('/api/simulations/sessions/:sessionId/result', requireAuth, async (req: AuthRequest, res) => {
+app.get(['/api/simulations/sessions/:sessionId/result', '/api/simulations/sessions/:sessionId/results'], requireAuth, async (req: AuthRequest, res) => {
   try {
     const { sessionId } = req.params;
     const [session] = await db

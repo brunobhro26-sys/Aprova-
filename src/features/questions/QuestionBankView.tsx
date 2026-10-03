@@ -100,7 +100,7 @@ export const QuestionBankView: React.FC = () => {
         revData,
         wrongData
       ] = await Promise.all([
-        ApiService.getQuestions(),
+        ApiService.getQuestions({ limit: 1000 }),
         ApiService.getExams().catch(() => []),
         ApiService.getOrganizations().catch(() => []),
         ApiService.getPositions().catch(() => []),
@@ -113,16 +113,17 @@ export const QuestionBankView: React.FC = () => {
         ApiService.getWrongQuestions().catch(() => [])
       ]);
 
-      setQuestions(qData);
-      setExams(eData);
-      setOrganizations(oData);
-      setPositions(pData);
-      setBoards(bData);
-      setSubjects(sData);
-      setSubjectsTopics(stData);
-      setTopics(tData);
-      setUserFavorites(favData);
-      setUserReviews(revData);
+      const questionsList = Array.isArray(qData) ? qData : (qData?.questions || []);
+      setQuestions(questionsList);
+      setExams(eData || []);
+      setOrganizations(oData || []);
+      setPositions(pData || []);
+      setBoards(bData || []);
+      setSubjects(sData || []);
+      setSubjectsTopics(stData || []);
+      setTopics(tData || []);
+      setUserFavorites(favData || []);
+      setUserReviews(revData || []);
       setUserWrongIds((wrongData || []).map((w: any) => w.id));
     } catch (err) {
       console.error('Error fetching questions bank:', err);
@@ -1092,10 +1093,10 @@ export const QuestionBankView: React.FC = () => {
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-primary-50 dark:bg-primary-950/60 text-primary-700 dark:text-primary-300 border border-primary-200 dark:border-primary-800">
-                      {q.code || `Q-${q.id}`}
+                      {q.code || `Q-${q.id.slice(0, 8)}`}
                     </span>
                     <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                      {q.year} • CESGRANRIO
+                      {q.year || '2024'} • {boards.find((b) => b.id === q.boardId)?.sigla || boards.find((b) => b.id === q.boardId)?.name || 'CESGRANRIO'}
                     </span>
                     <Badge
                       variant={
@@ -1107,7 +1108,7 @@ export const QuestionBankView: React.FC = () => {
                       }
                       size="sm"
                     >
-                      {q.difficulty}
+                      {q.difficulty || 'Médio'}
                     </Badge>
                     {isWrong && (
                       <Badge variant="danger" size="sm" className="flex items-center gap-1">
@@ -1144,14 +1145,20 @@ export const QuestionBankView: React.FC = () => {
                 {/* Hierarquia */}
                 <div className="text-xs text-slate-500 dark:text-slate-400 mb-3 flex items-center flex-wrap gap-1">
                   <span className="font-semibold text-slate-700 dark:text-slate-200">
-                    Transpetro — Técnico em Eletrotécnica
+                    {exams.find((e) => e.id === q.examId)?.name || organizations.find((o) => o.id === q.organizationId)?.name || 'Concurso Público'} — {positions.find((p) => p.id === q.positionId)?.name || 'Geral'}
                   </span>
                   <span>•</span>
-                  <span>Eletrotécnica</span>
-                  <span>→</span>
-                  <span className="text-primary-600 dark:text-primary-400 font-medium">
-                    Circuitos Elétricos
+                  <span className="font-medium text-slate-800 dark:text-slate-200">
+                    {subjects.find((s) => s.id === q.subjectId)?.name || 'Disciplina Geral'}
                   </span>
+                  {(q.subjectTopicId || q.topicId) && (
+                    <>
+                      <span>→</span>
+                      <span className="text-primary-600 dark:text-primary-400 font-medium">
+                        {subjectsTopics.find((st) => st.id === q.subjectTopicId)?.name || topics.find((t) => t.id === q.topicId)?.name || 'Assunto'}
+                      </span>
+                    </>
+                  )}
                 </div>
 
                 {/* Enunciado Preview */}

@@ -2,14 +2,17 @@ import { Question, PerformanceStats, Notebook, ExamContest, TaxonomySubject } fr
 
 export class ApiService {
   private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-    const adminRole = typeof window !== 'undefined' ? localStorage.getItem('aprova_admin_role') || 'SUPERADMIN' : 'SUPERADMIN';
+    const adminRole = typeof window !== 'undefined' ? localStorage.getItem('aprova_admin_role') : null;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...((options.headers as any) || {}),
+    };
+    if (adminRole) {
+      headers['x-admin-role'] = adminRole;
+    }
     const res = await fetch(endpoint, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-role': adminRole,
-        ...options.headers,
-      },
+      headers,
     });
 
     if (!res.ok) {
@@ -97,13 +100,28 @@ export class ApiService {
   }
 
   // 6. Questões
-  static async getQuestions(filters: Record<string, any> = {}): Promise<any[]> {
+  static async getQuestions(filters: Record<string, any> = {}): Promise<any> {
     const params = new URLSearchParams();
     Object.entries(filters).forEach(([k, v]) => {
-      if (v) params.append(k, String(v));
+      if (v !== undefined && v !== null && v !== '') params.append(k, String(v));
     });
     const queryString = params.toString() ? `?${params.toString()}` : '';
-    return this.request<any[]>(`/api/questions${queryString}`);
+    return this.request<any>(`/api/questions${queryString}`);
+  }
+
+  static async getQuestionDiagnostics(): Promise<{
+    totalQuestions: number;
+    published: number;
+    draft: number;
+    review: number;
+    archived: number;
+    bySubject: { id: string; name: string; count: number }[];
+    byBoard: { id: string; name: string; count: number }[];
+    byDifficulty: { difficulty: string; count: number }[];
+    quality: { withoutAlternatives: number; withoutCorrectAnswer: number; isHealthy: boolean };
+    simulations: { total: number; completed: number; inProgress: number };
+  }> {
+    return this.request<any>('/api/questions/diagnostics');
   }
 
   static async getQuestionById(id: string): Promise<any> {
@@ -114,6 +132,26 @@ export class ApiService {
     return this.request<any>('/api/questions', {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  }
+
+  static async updateQuestion(id: string, payload: any): Promise<any> {
+    return this.request<any>(`/api/questions/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  static async updateQuestionStatus(id: string, status: string): Promise<any> {
+    return this.request<any>(`/api/questions/${id}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  static async deleteQuestion(id: string): Promise<any> {
+    return this.request<any>(`/api/questions/${id}`, {
+      method: 'DELETE',
     });
   }
 
@@ -269,6 +307,29 @@ export class ApiService {
     });
   }
 
+  static async previewSimulation(payload: {
+    requestedCount?: number;
+    distributionConfig?: Record<string, number> | string;
+    examId?: string;
+    organizationId?: string;
+    boardId?: string;
+    positionId?: string;
+    subjectId?: string;
+    difficulty?: string;
+    year?: number;
+  }): Promise<{
+    requested: number;
+    available: number;
+    canStart: boolean;
+    hasEnough: boolean;
+    message: string;
+  }> {
+    return this.request<any>('/api/simulations/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   static async startSimulation(payload: {
     simulationId?: string;
     title?: string;
@@ -276,8 +337,12 @@ export class ApiService {
     timeLimitMinutes?: number;
     distributionConfig?: Record<string, number>;
     examId?: string;
+    organizationId?: string;
     boardId?: string;
     positionId?: string;
+    subjectId?: string;
+    difficulty?: string;
+    year?: number;
   }): Promise<{ session: any; questions: any[] }> {
     return this.request<{ session: any; questions: any[] }>('/api/simulations/start', {
       method: 'POST',

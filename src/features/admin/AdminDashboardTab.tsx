@@ -31,12 +31,17 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ onNavigate
   const [period, setPeriod] = useState<'7d' | '30d' | '90d' | 'all'>('30d');
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>(null);
+  const [diagnostics, setDiagnostics] = useState<any>(null);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const res = await ApiService.getAdminOverview(period);
+      const [res, diagRes] = await Promise.all([
+        ApiService.getAdminOverview(period).catch(() => null),
+        ApiService.getQuestionDiagnostics().catch(() => null)
+      ]);
       setData(res);
+      setDiagnostics(diagRes);
     } catch (err) {
       console.error('Error fetching admin overview:', err);
     } finally {
@@ -235,6 +240,108 @@ export const AdminDashboardTab: React.FC<AdminDashboardTabProps> = ({ onNavigate
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Diagnóstico do Banco de Questões & Saúde da Plataforma (Prompt 11, Requisitos 2 & 28) */}
+      {diagnostics && (
+        <Card className="p-6 border border-indigo-100 dark:border-indigo-900/50 bg-gradient-to-br from-white via-indigo-50/20 to-white dark:from-slate-900 dark:via-indigo-950/20 dark:to-slate-900 shadow-sm space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Saúde da Plataforma & Diagnóstico do Banco de Questões
+                </h3>
+                <Badge variant={diagnostics.quality?.isHealthy ? 'success' : 'warning'} size="sm">
+                  {diagnostics.quality?.isHealthy ? 'Integridade 100%' : 'Atenção Necessária'}
+                </Badge>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Métricas calculadas diretamente da base de dados PostgreSQL em tempo real.
+              </p>
+            </div>
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onNavigateTab('questoes')}
+              className="text-xs font-semibold self-start sm:self-auto"
+            >
+              Gerenciar Questões
+            </Button>
+          </div>
+
+          {/* Grid de Métricas do Diagnóstico */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 text-xs">
+            <div className="p-3 rounded-xl bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700">
+              <span className="text-slate-500 block">Total Geral</span>
+              <span className="text-xl font-black text-slate-900 dark:text-white mt-0.5 block">
+                {diagnostics.totalQuestions}
+              </span>
+              <span className="text-[10px] text-slate-400">questões cadastradas</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200">
+              <span className="text-emerald-700 dark:text-emerald-300 block">Publicadas</span>
+              <span className="text-xl font-black text-emerald-600 dark:text-emerald-400 mt-0.5 block">
+                {diagnostics.published}
+              </span>
+              <span className="text-[10px] text-emerald-600/70">visíveis aos alunos</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200">
+              <span className="text-amber-700 dark:text-amber-300 block">Rascunho</span>
+              <span className="text-xl font-black text-amber-600 dark:text-amber-400 mt-0.5 block">
+                {diagnostics.draft}
+              </span>
+              <span className="text-[10px] text-amber-600/70">em elaboração</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-blue-900 dark:text-blue-200">
+              <span className="text-blue-700 dark:text-blue-300 block">Em Revisão</span>
+              <span className="text-xl font-black text-blue-600 dark:text-blue-400 mt-0.5 block">
+                {diagnostics.review}
+              </span>
+              <span className="text-[10px] text-blue-600/70">revisão pedagógica</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+              <span className="text-slate-500 block">Simulados Feitos</span>
+              <span className="text-xl font-black text-indigo-600 dark:text-indigo-400 mt-0.5 block">
+                {diagnostics.simulations?.completed || 0}
+              </span>
+              <span className="text-[10px] text-slate-400">{diagnostics.simulations?.inProgress || 0} em andamento</span>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+              <span className="text-slate-500 block">Qualidade dos Dados</span>
+              <span className="text-xl font-black text-emerald-600 mt-0.5 block">
+                {diagnostics.quality?.withoutCorrectAnswer === 0 ? '0 Erros' : `${diagnostics.quality?.withoutCorrectAnswer} sem gabarito`}
+              </span>
+              <span className="text-[10px] text-slate-400">todas com alternativas</span>
+            </div>
+          </div>
+
+          {/* Distribuição por Disciplinas */}
+          {diagnostics.bySubject?.length > 0 && (
+            <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 block">
+                Acervo por Disciplina:
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {diagnostics.bySubject.map((sb: any) => (
+                  <span
+                    key={sb.id}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-300 shadow-2xs"
+                  >
+                    <span>{sb.name}:</span>
+                    <strong className="text-indigo-600 dark:text-indigo-400 font-bold">{sb.count}</strong>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
       )}
 
       {/* Visual Charts Grid */}

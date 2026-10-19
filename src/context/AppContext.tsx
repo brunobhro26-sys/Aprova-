@@ -83,12 +83,42 @@ interface AppContextType {
   logout: () => void;
 }
 
+const getInitialTabFromPath = (): NavigationTab => {
+  if (typeof window === 'undefined') return 'dashboard';
+  const path = window.location.pathname.toLowerCase();
+  if (path.startsWith('/banco-de-questoes') || path.startsWith('/questoes')) return 'questions';
+  if (path.startsWith('/simulados')) return 'simulations';
+  if (path.startsWith('/meus-cadernos') || path.startsWith('/cadernos')) return 'notebooks';
+  if (path.startsWith('/disciplinas')) return 'disciplines';
+  if (path.startsWith('/plano-de-estudos')) return 'study-plan';
+  if (path.startsWith('/revisoes')) return 'reviews';
+  if (path.startsWith('/caderno-de-erros') || path.startsWith('/erros')) return 'mistakes';
+  if (path.startsWith('/favoritos')) return 'favorites';
+  if (path.startsWith('/desempenho')) return 'performance';
+  if (path.startsWith('/relatorios')) return 'reports';
+  if (path.startsWith('/conquistas')) return 'achievements';
+  if (path.startsWith('/perfil')) return 'profile';
+  if (path.startsWith('/admin')) return 'admin';
+  if (path.startsWith('/concursos')) return 'explore-concursos';
+  if (path.startsWith('/dashboard')) return 'dashboard';
+  return 'dashboard';
+};
+
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User>(() => DBService.getCurrentUser());
-  const [activeTab, setActiveTabState] = useState<NavigationTab>('dashboard');
+  const [activeTab, setActiveTabState] = useState<NavigationTab>(() => getInitialTabFromPath());
   const [refreshKey, setRefreshKey] = useState<number>(0);
+
+  // Synchronize on browser Back / Forward buttons
+  useEffect(() => {
+    const handlePopState = () => {
+      setActiveTabState(getInitialTabFromPath());
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Dark mode
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -161,6 +191,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const setActiveTab = (tab: NavigationTab) => {
     setActiveTabState(tab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
+
+    // Sync URL in address bar seamlessly
+    try {
+      const tabPaths: Partial<Record<NavigationTab, string>> = {
+        dashboard: '/dashboard',
+        questions: '/banco-de-questoes',
+        simulations: '/simulados',
+        notebooks: '/meus-cadernos',
+        disciplines: '/disciplinas',
+        'study-plan': '/plano-de-estudos',
+        reviews: '/revisoes',
+        mistakes: '/caderno-de-erros',
+        favorites: '/favoritos',
+        performance: '/desempenho',
+        reports: '/relatorios',
+        achievements: '/conquistas',
+        profile: '/perfil',
+        admin: '/admin',
+        'explore-concursos': '/concursos',
+      };
+      const newPath = tabPaths[tab] || '/dashboard';
+      if (window.location.pathname !== newPath) {
+        window.history.pushState({ tab }, '', newPath);
+      }
+    } catch (e) {
+      // ignore
+    }
   };
 
   const openPaywall = () => setIsPaywallOpen(true);

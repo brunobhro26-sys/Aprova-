@@ -149,8 +149,9 @@ export const SimulationView: React.FC = () => {
           ApiService.getSimulationSession(parsed.sessionId)
             .then((serverData) => {
               if (serverData?.session?.status === 'in_progress') {
-                const diff = serverData.session.remainingSeconds || 0;
-                if (diff > 0) {
+                const diff = serverData.session.remainingSeconds ?? 0;
+                const isNoLimit = !serverData.session.expiresAt || serverData.session.timeLimitMinutes === 0;
+                if (diff > 0 || isNoLimit) {
                   // Mapear respostas salvas no PostgreSQL
                   const answersMap: Record<string, string> = {};
                   const markedMap: Record<string, boolean> = {};
@@ -162,10 +163,10 @@ export const SimulationView: React.FC = () => {
                     ...parsed,
                     answers: answersMap,
                     markedForReview: markedMap,
-                    questions: serverData.questions || parsed.questions,
+                    questions: (serverData.questions && serverData.questions.length > 0) ? serverData.questions : parsed.questions,
                     expiresAt: serverData.session.expiresAt,
                   });
-                  setTimeRemainingSeconds(diff);
+                  setTimeRemainingSeconds(diff > 0 ? diff : (parsed.timeLimitMinutes || 30) * 60);
                   setViewState('taking');
                   return;
                 }
@@ -245,7 +246,10 @@ export const SimulationView: React.FC = () => {
         title: sim.title,
         totalQuestions: sim.totalQuestions,
         timeLimitMinutes: sim.timeLimitMinutes,
-        distributionConfig: sim.distributionConfig
+        distributionConfig: sim.distributionConfig,
+        examId: sim.examId || undefined,
+        positionId: sim.positionId || undefined,
+        boardId: sim.boardId || undefined,
       });
 
       const initialAnswers: Record<string, string> = {};
@@ -486,13 +490,23 @@ export const SimulationView: React.FC = () => {
       // Clean local storage
       localStorage.removeItem('aprova_plus_active_session');
 
+      let detailedQ = finishRes.questions;
+      if (!detailedQ || detailedQ.length === 0) {
+        try {
+          const resultRes = await ApiService.getSimulationResult(activeSession.sessionId);
+          detailedQ = resultRes.questions;
+        } catch (e) {
+          detailedQ = activeSession.questions;
+        }
+      }
+
       // Set result data
       setResultData({
         session: finishRes.session,
         summary: finishRes.summary,
         subjectBreakdown: finishRes.subjectBreakdown,
         topicBreakdown: finishRes.topicBreakdown,
-        questions: activeSession.questions
+        questions: detailedQ || activeSession.questions
       });
 
       setViewState('result');
@@ -724,20 +738,31 @@ export const SimulationView: React.FC = () => {
                     Anterior
                   </Button>
 
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    disabled={activeSession.currentIndex === totalQ - 1}
-                    onClick={() =>
-                      setActiveSession({
-                        ...activeSession,
-                        currentIndex: Math.min(totalQ - 1, activeSession.currentIndex + 1)
-                      })
-                    }
-                  >
-                    Próxima
-                    <ChevronRight className="w-4 h-4 ml-1" />
-                  </Button>
+                  {activeSession.currentIndex === totalQ - 1 ? (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() => setFinishModalOpen(true)}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
+                    >
+                      <CheckCircle2 className="w-4 h-4 mr-1" />
+                      Finalizar Simulado
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={() =>
+                        setActiveSession({
+                          ...activeSession,
+                          currentIndex: Math.min(totalQ - 1, activeSession.currentIndex + 1)
+                        })
+                      }
+                    >
+                      Próxima
+                      <ChevronRight className="w-4 h-4 ml-1" />
+                    </Button>
+                  )}
                 </div>
               </div>
             </Card>
@@ -1104,61 +1129,163 @@ export const SimulationView: React.FC = () => {
             </div>
 
             {/* Filter buttons */}
-            <div className="flex gap-1.5 text-xs">
+            <div className="flex flex-wrap gap-1.5 text-xs">
               <button
                 onClick={() => setResultFilter('all')}
-                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
                   resultFilter === 'all'
-                    ? 'bg-slate-800 text-white dark:bg-white dark:text-slate-900'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                    ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
                 }`}
               >
                 Todas ({resultData.questions?.length || 0})
               </button>
               <button
-                onClick={() => setResultFilter('wrong')}
-                className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
-                  resultFilter === 'wrong'
-                    ? 'bg-rose-600 text-white'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                onClick={() => setResultFilter('correct')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                  resultFilter === 'correct'
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100'
                 }`}
               >
-                Erradas ({summary.totalWrong})
+                Acertos ({summary.totalCorrect || 0})
+              </button>
+              <button
+                onClick={() => setResultFilter('wrong')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                  resultFilter === 'wrong'
+                    ? 'bg-rose-600 text-white'
+                    : 'bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 hover:bg-rose-100'
+                }`}
+              >
+                Erradas ({summary.totalWrong || 0})
+              </button>
+              <button
+                onClick={() => setResultFilter('blank')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-colors cursor-pointer ${
+                  resultFilter === 'blank'
+                    ? 'bg-slate-600 text-white'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200'
+                }`}
+              >
+                Em Branco ({summary.totalBlank || 0})
               </button>
             </div>
           </div>
 
           {/* Questions list */}
           <div className="space-y-6">
-            {(resultData.questions || []).map((q, idx) => {
+            {((resultData.questions || []).filter((q) => {
+              if (resultFilter === 'correct') return q.isCorrect === true;
+              if (resultFilter === 'wrong') return q.userAnswer && q.isCorrect === false;
+              if (resultFilter === 'blank') return !q.userAnswer;
+              return true;
+            })).map((q, idx) => {
               const correctAlt = (q.alternatives || []).find((a: any) => a.isCorrect);
-              const correctLetter = correctAlt?.letter || 'B';
+              const correctLetter = q.correctOptionLetter || correctAlt?.letter || 'A';
+              const userLetter = q.userAnswer;
+              const isCorrect = q.isCorrect;
 
               return (
                 <div
-                  key={q.id}
-                  className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 space-y-4"
+                  key={q.id || idx}
+                  className="p-5 md:p-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs space-y-4"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-bold text-primary-600">
-                      Questão {idx + 1} • {q.code || `Q-${q.id}`}
-                    </span>
-                    <Badge variant="outline" size="sm">
-                      {q.difficulty || 'Médio'}
-                    </Badge>
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs font-bold text-primary-600 dark:text-primary-400">
+                        Questão {idx + 1} • {q.code || `Q-${q.id}`}
+                      </span>
+                      <Badge variant="outline" size="sm">
+                        {q.difficulty || 'Médio'}
+                      </Badge>
+                    </div>
+
+                    <div>
+                      {isCorrect ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Você Acertou
+                        </span>
+                      ) : userLetter ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300">
+                          <XCircle className="w-3.5 h-3.5" />
+                          Você Errou
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                          <HelpCircle className="w-3.5 h-3.5" />
+                          Não Respondida
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <p className="text-sm text-slate-800 dark:text-slate-200 leading-relaxed font-medium">
                     {q.statement}
                   </p>
 
-                  <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 text-xs space-y-1">
-                    <div className="font-bold text-emerald-600 dark:text-emerald-400">
-                      Gabarito Oficial: Alternativa ({correctLetter})
+                  {/* Alternatives display with student choice and correct choice highlights */}
+                  <div className="space-y-2 pt-1">
+                    {(q.alternatives || []).map((alt: any) => {
+                      const isThisSelected = userLetter === alt.letter;
+                      const isThisCorrect = alt.letter === correctLetter || alt.isCorrect;
+
+                      let altStyle =
+                        'border-slate-200 dark:border-slate-700/80 bg-slate-50/50 dark:bg-slate-800/40 text-slate-700 dark:text-slate-300';
+                      if (isThisCorrect) {
+                        altStyle =
+                          'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 ring-1 ring-emerald-500/40 font-medium';
+                      } else if (isThisSelected && !isCorrect) {
+                        altStyle =
+                          'border-rose-400 bg-rose-50/70 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200 line-through';
+                      }
+
+                      return (
+                        <div
+                          key={alt.letter}
+                          className={`p-3 rounded-xl border flex items-start gap-3 text-xs md:text-sm ${altStyle}`}
+                        >
+                          <span
+                            className={`w-6 h-6 rounded-md flex items-center justify-center font-bold text-xs shrink-0 ${
+                              isThisCorrect
+                                ? 'bg-emerald-600 text-white'
+                                : isThisSelected
+                                ? 'bg-rose-600 text-white'
+                                : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                            }`}
+                          >
+                            {alt.letter}
+                          </span>
+                          <div className="flex-1 pt-0.5">{alt.text}</div>
+                          {isThisCorrect && (
+                            <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 shrink-0">
+                              ✓ Gabarito
+                            </span>
+                          )}
+                          {isThisSelected && !isThisCorrect && (
+                            <span className="text-[11px] font-bold text-rose-600 dark:text-rose-400 shrink-0">
+                              ✗ Sua Escolha
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="p-4 bg-emerald-50/60 dark:bg-emerald-950/30 rounded-xl border border-emerald-200 dark:border-emerald-800 text-xs space-y-1.5">
+                    <div className="font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-emerald-600" />
+                      Gabarito Oficial & Comentário do Professor: Alternativa ({correctLetter})
                     </div>
-                    <p className="text-slate-600 dark:text-slate-300 leading-relaxed pt-1">
-                      {q.explanation}
+                    <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                      {q.explanation || 'Comentário da questão disponível no banco de dados da APROVA+.'}
                     </p>
+                    {q.bibliographicReference && (
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 pt-1 border-t border-emerald-200/60 dark:border-emerald-800/60">
+                        Fonte / Referência: {q.bibliographicReference}
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -1550,25 +1677,105 @@ export const SimulationView: React.FC = () => {
                 variant="primary"
                 size="lg"
                 onClick={() => {
-                  const official = availableSimulations.find((s) => s.isOfficial) || {
-                    id: 'sim-transpetro-01',
-                    title: 'Simulado Oficial Transpetro 2024 - CESGRANRIO',
-                    totalQuestions: 20,
-                    timeLimitMinutes: 30,
-                    distributionConfig: {
-                      'sub-portugues': 5,
-                      'sub-matematica': 5,
-                      'sub-eletrotecnica': 10
-                    }
-                  };
+                  const official =
+                    availableSimulations.find((s) => s.id === 'sim-transpetro-2024-eletro') ||
+                    availableSimulations.find((s) => s.isOfficial) ||
+                    availableSimulations[0] || {
+                      id: 'sim-transpetro-01',
+                      title: 'Simulado Oficial Transpetro 2024 - CESGRANRIO',
+                      totalQuestions: 20,
+                      timeLimitMinutes: 30,
+                      distributionConfig: {
+                        'sub-portugues': 5,
+                        'sub-matematica': 5,
+                        'sub-eletrotecnica': 10
+                      }
+                    };
                   handleStartOfficial(official);
                 }}
-                className="bg-white text-primary-900 hover:bg-slate-100 font-bold px-8 shadow-lg"
+                className="bg-white text-primary-900 hover:bg-slate-100 font-bold px-8 shadow-lg cursor-pointer"
               >
                 <Play className="w-4 h-4 fill-current mr-2" />
                 Iniciar Simulado Oficial
               </Button>
             </div>
+          </div>
+
+          {/* Grid de Todos os Simulados Oficiais Disponíveis */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Target className="w-5 h-5 text-indigo-600" />
+                  Cadernos e Simulados Oficiais Disponíveis
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Provas organizadas e gabaritadas com contagem regressiva e correção imediata no servidor.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setViewState('config')}
+                className="hidden sm:inline-flex text-xs font-semibold cursor-pointer"
+              >
+                <Sliders className="w-3.5 h-3.5 mr-1.5" />
+                Montar Personalizado
+              </Button>
+            </div>
+
+            {loadingInitial ? (
+              <div className="p-8 text-center text-xs text-slate-500">Carregando simulados disponíveis...</div>
+            ) : availableSimulations.length === 0 ? (
+              <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-center text-xs text-slate-500">
+                Nenhum simulado oficial cadastrado no momento.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {availableSimulations.map((sim) => (
+                  <div
+                    key={sim.id}
+                    className="p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xs hover:border-indigo-400 dark:hover:border-indigo-600 transition-all flex flex-col justify-between space-y-4"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <Badge variant="primary" size="sm">
+                          {sim.isOfficial ? 'Oficial' : 'Personalizado'}
+                        </Badge>
+                        <span className="text-[11px] font-semibold text-slate-400">
+                          {sim.timeLimitMinutes > 0 ? `${sim.timeLimitMinutes} min` : 'Sem limite'}
+                        </span>
+                      </div>
+
+                      <h4 className="font-bold text-sm text-slate-900 dark:text-white leading-snug line-clamp-2">
+                        {sim.title}
+                      </h4>
+
+                      <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 leading-relaxed">
+                        {sim.description || 'Simulado completo com questões reais do acervo APROVA+.'}
+                      </p>
+                    </div>
+
+                    <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300">
+                        <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                        <span>{sim.totalQuestions} questões</span>
+                      </div>
+
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => handleStartOfficial(sim)}
+                        className="font-bold text-xs bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs cursor-pointer"
+                      >
+                        <Play className="w-3 h-3 fill-current mr-1" />
+                        Fazer Simulado
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Histórico de Simulados Realizados */}

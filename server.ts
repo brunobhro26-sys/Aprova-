@@ -1763,6 +1763,17 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
       });
     }
 
+    let validSimId: string | null = null;
+    if (simulationId) {
+      const [existingSim] = await db
+        .select({ id: simulations.id })
+        .from(simulations)
+        .where(eq(simulations.id, String(simulationId)));
+      if (existingSim) {
+        validSimId = existingSim.id;
+      }
+    }
+
     const sessionId = `sess-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const minutes = Number(timeLimitMinutes !== undefined ? timeLimitMinutes : 30);
     const now = new Date();
@@ -1772,7 +1783,7 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
       .insert(simulationSessions)
       .values({
         id: sessionId,
-        simulationId: simulationId || null,
+        simulationId: validSimId,
         userId,
         title: title || 'Simulado Personalizado',
         totalQuestions: selectedQuestions.length,
@@ -1789,24 +1800,27 @@ app.post('/api/simulations/start', requireAuth, async (req: AuthRequest, res) =>
       })
       .returning();
 
-    // Inserir respostas preparadas para a sessão (snapshot imutável)
-    for (let i = 0; i < selectedQuestions.length; i++) {
-      await db.insert(simulationAnswers).values({
-        sessionId,
-        questionId: selectedQuestions[i].id,
-        orderIndex: i,
-        selectedOptionLetter: null,
-        isMarkedForReview: false,
-        timeSpentSeconds: 0,
-      });
+    // Inserir respostas preparadas para a sessão em BATCH ÚNICO de alta performance
+    const answerRecords = selectedQuestions.map((q, i) => ({
+      sessionId,
+      questionId: q.id,
+      orderIndex: i,
+      selectedOptionLetter: null,
+      isMarkedForReview: false,
+      timeSpentSeconds: 0,
+    }));
+    if (answerRecords.length > 0) {
+      await db.insert(simulationAnswers).values(answerRecords);
     }
 
     // Carregar alternativas das questões selecionadas e sanitizar (ocultar isCorrect para o estudante)
     const qIds = selectedQuestions.map((q) => q.id);
-    const allAlts = await db
-      .select()
-      .from(questionAlternatives)
-      .where(sql`${questionAlternatives.questionId} IN (${sql.join(qIds.map((id) => sql`${id}`), sql`, `)})`);
+    const allAlts = qIds.length > 0
+      ? await db
+          .select()
+          .from(questionAlternatives)
+          .where(sql`${questionAlternatives.questionId} IN (${sql.join(qIds.map((id) => sql`${id}`), sql`, `)})`)
+      : [];
 
     const altsMap: Record<string, any[]> = {};
     for (const alt of allAlts) {
@@ -1867,10 +1881,18 @@ app.get('/api/simulations/sessions/:sessionId', requireAuth, async (req: AuthReq
         .from(questionAlternatives)
         .where(sql`${questionAlternatives.questionId} IN (${sql.join(questionIds.map((id) => sql`${id}`), sql`, `)})`);
 
+      const isCompleted = session.status === 'completed';
       const altsMap: Record<string, any[]> = {};
       for (const alt of alts) {
         if (!altsMap[alt.questionId]) altsMap[alt.questionId] = [];
-        altsMap[alt.questionId].push(alt);
+        altsMap[alt.questionId].push({
+          id: alt.id,
+          questionId: alt.questionId,
+          letter: alt.letter,
+          text: alt.text,
+          orderIndex: alt.orderIndex,
+          ...(isCompleted ? { isCorrect: alt.isCorrect } : {}),
+        });
       }
 
       // Ordenar questões exatamente na ordem de answers
@@ -1953,7 +1975,7 @@ app.post('/api/simulations/sessions/:sessionId/answers', requireAuth, async (req
   }
 });
 
-// Finalizar Simulado & Corrigir Automaticamente
+// Finalizar Simulado & Corrigir Automaticamente (Otimizado em Lote)
 app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req: AuthRequest, res) => {
   try {
     const { sessionId } = req.params;
@@ -1970,6 +1992,12 @@ app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req:
 
     // Proteção contra finalização duplicada (Idempotência)
     if (session.status === 'completed') {
+      const existingResult = await db
+        .select()
+        .from(simulationAnswers)
+        .where(eq(simulationAnswers.sessionId, sessionId))
+        .orderBy(simulationAnswers.orderIndex);
+
       return res.json({
         session,
         summary: {
@@ -1988,57 +2016,73 @@ app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req:
     const answers = await db
       .select()
       .from(simulationAnswers)
-      .where(eq(simulationAnswers.sessionId, sessionId));
+      .where(eq(simulationAnswers.sessionId, sessionId))
+      .orderBy(simulationAnswers.orderIndex);
+
+    const questionIds = answers.map((a) => a.questionId);
+
+    // Carregar todas as alternativas corretas em 1 única query
+    const correctAlts = questionIds.length > 0
+      ? await db
+          .select()
+          .from(questionAlternatives)
+          .where(sql`${questionAlternatives.questionId} IN (${sql.join(questionIds.map((id) => sql`${id}`), sql`, `)}) AND ${questionAlternatives.isCorrect} = true`)
+      : [];
+    const correctAltMap = new Map(correctAlts.map((c) => [c.questionId, c]));
+
+    // Carregar todas as alternativas com texto
+    const allAlts = questionIds.length > 0
+      ? await db
+          .select()
+          .from(questionAlternatives)
+          .where(sql`${questionAlternatives.questionId} IN (${sql.join(questionIds.map((id) => sql`${id}`), sql`, `)})`)
+      : [];
+    const altsMap: Record<string, any[]> = {};
+    for (const alt of allAlts) {
+      if (!altsMap[alt.questionId]) altsMap[alt.questionId] = [];
+      altsMap[alt.questionId].push(alt);
+    }
+
+    // Carregar todas as questões em 1 única query
+    const rawQuestions = questionIds.length > 0
+      ? await db
+          .select()
+          .from(questions)
+          .where(sql`${questions.id} IN (${sql.join(questionIds.map((id) => sql`${id}`), sql`, `)})`)
+      : [];
+    const qMap = new Map(rawQuestions.map((q) => [q.id, q]));
 
     let correctCount = 0;
     let wrongCount = 0;
     let blankCount = 0;
     let totalTimeSpent = 0;
 
-    // Estatísticas por disciplina e tópico
-    const subjectStats: Record<string, { name: string; total: number; correct: number; wrong: number }> = {};
-    const topicStats: Record<string, { name: string; total: number; correct: number; wrong: number }> = {};
+    const subjectStats: Record<string, { total: number; correct: number; wrong: number }> = {};
+    const topicStats: Record<string, { total: number; correct: number; wrong: number }> = {};
+    const attemptsToInsert: any[] = [];
+    const answersUpdates: Array<{ id: number; isCorrect: boolean }> = [];
 
-    for (const ans of answers) {
+    const detailedQuestions = answers.map((ans) => {
       totalTimeSpent += ans.timeSpentSeconds || 0;
+      const q = qMap.get(ans.questionId) || ({} as any);
+      const correctAlt = correctAltMap.get(ans.questionId);
+      const qAlts = (altsMap[ans.questionId] || []).sort((a, b) => a.orderIndex - b.orderIndex);
 
-      // Buscar alternativa correta
-      const [correctAlt] = await db
-        .select()
-        .from(questionAlternatives)
-        .where(and(eq(questionAlternatives.questionId, ans.questionId), eq(questionAlternatives.isCorrect, true)));
+      const subjId = q.subjectId || 'Geral';
+      const topId = q.topicId || q.subjectTopicId || 'Tópico Geral';
 
-      const [q] = await db
-        .select({
-          id: questions.id,
-          subjectId: questions.subjectId,
-          subjectTopicId: questions.subjectTopicId,
-          topicId: questions.topicId,
-        })
-        .from(questions)
-        .where(eq(questions.id, ans.questionId));
-
-      const subjId = q?.subjectId || 'Geral';
-      const topId = q?.topicId || q?.subjectTopicId || 'Tópico Geral';
-
-      if (!subjectStats[subjId]) {
-        subjectStats[subjId] = { name: subjId, total: 0, correct: 0, wrong: 0 };
-      }
-      if (!topicStats[topId]) {
-        topicStats[topId] = { name: topId, total: 0, correct: 0, wrong: 0 };
-      }
+      if (!subjectStats[subjId]) subjectStats[subjId] = { total: 0, correct: 0, wrong: 0 };
+      if (!topicStats[topId]) topicStats[topId] = { total: 0, correct: 0, wrong: 0 };
 
       subjectStats[subjId].total += 1;
       topicStats[topId].total += 1;
 
+      let isCorrect = false;
       if (!ans.selectedOptionLetter) {
         blankCount += 1;
-        await db
-          .update(simulationAnswers)
-          .set({ isCorrect: false })
-          .where(eq(simulationAnswers.id, ans.id));
+        answersUpdates.push({ id: ans.id, isCorrect: false });
       } else {
-        const isCorrect = correctAlt ? correctAlt.letter === ans.selectedOptionLetter : false;
+        isCorrect = correctAlt ? correctAlt.letter === ans.selectedOptionLetter : false;
         if (isCorrect) {
           correctCount += 1;
           subjectStats[subjId].correct += 1;
@@ -2049,13 +2093,9 @@ app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req:
           topicStats[topId].wrong += 1;
         }
 
-        await db
-          .update(simulationAnswers)
-          .set({ isCorrect })
-          .where(eq(simulationAnswers.id, ans.id));
+        answersUpdates.push({ id: ans.id, isCorrect });
 
-        // Registrar tentativa no question_attempts para alimentar métricas globais
-        await db.insert(questionAttempts).values({
+        attemptsToInsert.push({
           userId,
           questionId: ans.questionId,
           selectedOptionLetter: ans.selectedOptionLetter,
@@ -2064,6 +2104,28 @@ app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req:
           attemptNumber: 1,
         });
       }
+
+      return {
+        ...q,
+        alternatives: qAlts,
+        userAnswer: ans.selectedOptionLetter,
+        isCorrect,
+        isMarkedForReview: ans.isMarkedForReview,
+        correctOptionLetter: correctAlt ? correctAlt.letter : 'A',
+        timeSpentSeconds: ans.timeSpentSeconds || 0,
+      };
+    });
+
+    // Atualizar simulationAnswers em lote
+    await Promise.all(
+      answersUpdates.map((u) =>
+        db.update(simulationAnswers).set({ isCorrect: u.isCorrect }).where(eq(simulationAnswers.id, u.id))
+      )
+    );
+
+    // Inserir questionAttempts em batch único
+    if (attemptsToInsert.length > 0) {
+      await db.insert(questionAttempts).values(attemptsToInsert);
     }
 
     const scorePercentage = answers.length > 0 ? ((correctCount / answers.length) * 100).toFixed(1) : '0';
@@ -2135,6 +2197,7 @@ app.post('/api/simulations/sessions/:sessionId/finish', requireAuth, async (req:
       },
       subjectBreakdown: formattedSubjectBreakdown,
       topicBreakdown: formattedTopicBreakdown,
+      questions: detailedQuestions,
       gamification: gamificationInfo,
     });
   } catch (error) {

@@ -399,6 +399,7 @@ export class ApiService {
       wrong: number;
       percentage: number;
     }>;
+    questions?: any[];
   }> {
     return this.request<any>(`/api/simulations/sessions/${sessionId}/finish`, {
       method: 'POST',
